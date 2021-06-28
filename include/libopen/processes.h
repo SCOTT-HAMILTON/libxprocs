@@ -15,7 +15,7 @@
 #ifdef USE_HACKY_PROCESSES_MONITOR
 #include <map>
 #include <set>
-#endif
+#endif //USE_HACKY_PROCESSES_MONITOR
 
 #ifdef _WIN32
 /*
@@ -29,21 +29,22 @@
 #include <Tlhelp32.h>
 #ifdef _WIN32_WINNT
 #undef _WIN32_WINNT
-#endif
+#endif //_WIN32_WINNT
 #define _WIN32_WINNT 0x502
 #define LIBOPENPROCESSES_WINDLLEXPORT 1
 /* Linux */
-#else
+#else // _WIN32
 #define LIBOPENPROCESSES_WINDLLEXPORT 0
-#endif
+#endif //_WIN32
+
 #if LIBOPENPROCESSES_WINDLLEXPORT
 #define LIBOPEN_API __declspec(dllexport)
 #else
-#define LIBOPEN_API extern
+#define LIBOPEN_API  
 #endif
 
 #ifndef MAX_PATH
-#def MAX_PATH 1024
+#define MAX_PATH 1024
 #endif
 
 namespace libopen {
