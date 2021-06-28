@@ -12,6 +12,7 @@
 #include <iterator> 
 #include <string>
 #include <vector>
+#include <exception>
 #ifdef USE_HACKY_PROCESSES_MONITOR
 #include <map>
 #include <set>
@@ -48,6 +49,18 @@
 #endif
 
 namespace libopen {
+
+class FailedToGetProcessError: public std::exception
+{
+public:
+    FailedToGetProcessError(const char* what) :
+        m_what("FailedToGetProcessError: "+std::string(what)) {}
+    virtual const char* what() const throw() {
+        return m_what.c_str();
+    }
+private:
+    std::string m_what;
+};
 
 enum PROCESS_STATUS {
     UNKNOWN = 0,              // The status of the process is unknow or the PROCESS struct is unintialized

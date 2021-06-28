@@ -7,7 +7,33 @@
 */
 #include <libopen/processes.h> 
 #include <iostream> //TODO: remove
+#include <QDebug>
+#include <Psapi.h>
+#include <tchar.h>
+#include <winrt/base.h>
 
+std::string GetErrorMessage(DWORD errorMessageID)
+{
+    //Get the error message ID, if any.
+    if(errorMessageID == 0) {
+        return std::string(); //No error message has been recorded
+    }
+
+    LPSTR messageBuffer = nullptr;
+
+    //Ask Win32 to give us the string version of that message ID.
+    //The parameters we pass in, tell Win32 to create the buffer that holds the message for us (because we don't yet know how long the message string will be).
+    size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                 NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
+
+    //Copy the error message into a std::string.
+    std::string message(messageBuffer, size);
+
+    //Free the Win32's string's buffer.
+    LocalFree(messageBuffer);
+
+    return message;
+}
 namespace libopen {
 
 /**
@@ -29,35 +55,47 @@ LIBOPEN_API void InitProcess( PROCESS *process )
  */
 LIBOPEN_API PROCESS GetProcessById( unsigned int processID )
 {
-    PROCESS p; 
+    PROCESS p;
     InitProcess(&p);
     p.Id = processID;
-    #ifdef _WIN32
-    HANDLE hProcess = OpenProcess( PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processID );
-    if ( hProcess != NULL )
-    {
-        p.status = PROCESS_STATUS::RUNNING;
+#ifdef _WIN32
+    WCHAR szProcessName[MAX_PATH] = TEXT("Unknown");
+    WCHAR szProcessFileName[MAX_PATH] = TEXT("Unknown");
+    size_t szProcessNameSize = 0;
+    size_t szProcessFileNameSize = 0;
+    // Get a handle to the process.
+    HANDLE hProcess = OpenProcess( PROCESS_QUERY_INFORMATION |
+                                  PROCESS_VM_READ,
+                                  FALSE, processID );
+    // Get the process name.
+    if (NULL != hProcess ) {
         HMODULE hMod;
         DWORD cbNeeded;
-        if ( EnumProcessModules( hProcess, &hMod, sizeof(hMod), &cbNeeded) ) 
-        {
-            TCHAR szProcessName[MAX_PATH] = TEXT("");
-            TCHAR szProcessPath[MAX_PATH] = TEXT("");
-            
-            GetModuleBaseName( hProcess, hMod, szProcessName, sizeof(szProcessName)/sizeof(TCHAR) );
-            GetModuleFileNameExA( hProcess, hMod, (LPSTR)szProcessPath, sizeof(szProcessPath)/sizeof(TCHAR) );
-            p.exeName = (char *)szProcessName;
-            p.exePath = (char *)szProcessPath;
-            
-            
-            ZeroMemory( szProcessName, sizeof(szProcessName) );
-            ZeroMemory( szProcessPath, sizeof(szProcessPath) );
+
+        if ( EnumProcessModulesEx( hProcess, &hMod, sizeof(hMod),
+        &cbNeeded, LIST_MODULES_ALL) ) {
+           szProcessNameSize = GetModuleBaseName( hProcess, hMod, szProcessName,
+                                   sizeof(szProcessName)/sizeof(WCHAR));
+           if (szProcessNameSize == 0) {
+               throw FailedToGetProcessError(GetErrorMessage(GetLastError()).c_str());
+            }
+            szProcessFileNameSize = GetModuleFileName(hMod, szProcessFileName, sizeof(szProcessFileName)/sizeof(WCHAR));
+            if (szProcessFileNameSize == 0) {
+                throw FailedToGetProcessError(GetErrorMessage(GetLastError()).c_str());
+            }
+        } else {
+            throw FailedToGetProcessError(GetErrorMessage(GetLastError()).c_str());
         }
+    } else {
+        throw FailedToGetProcessError(GetErrorMessage(GetLastError()).c_str());
     }
-    #else
-    
-    #endif
-    
+    p.exeName = winrt::to_string(std::wstring(szProcessName,szProcessNameSize));
+    p.exePath = winrt::to_string(std::wstring(szProcessFileName,szProcessFileNameSize));
+    qDebug() << "path : " << p.exePath.c_str();
+    // Release the handle to the process.
+
+    CloseHandle( hProcess );
+#endif
     return p;
 }
 
@@ -82,40 +120,95 @@ LIBOPEN_API PROCESS GetProcessById( unsigned int processID )
     \return the std::vector of running PROCESSes
     
 */
-LIBOPEN_API std::vector<PROCESS> RunningProcesses( ProcessCondition callbackCondition, void* extraParam ) 
-{
-    std::vector<PROCESS> processes;
-    #ifdef _WIN32
-    DWORD aProcesses[1024], cbNeeded, cProcesses;
-    #else
-    unsigned int aProcesses[1024], cbNeeded, cProcesses;
-    #endif
-    unsigned int i;
 
-    if (!EnumProcesses( aProcesses, sizeof(aProcesses), &cbNeeded ))
+LIBOPEN_API std::vector<PROCESS> RunningProcessesWithEnumProcesses( ProcessCondition callbackCondition, void* extraParam ) {
+    std::vector<PROCESS> processes;
+#ifdef _WIN32
+    DWORD aProcesses[1024], cbNeeded, cProcesses;
+    unsigned int i;
+    if ( !EnumProcesses( aProcesses, sizeof(aProcesses), &cbNeeded ) )
     {
         return processes;
     }
+    // Calculate how many process identifiers were returned.
     cProcesses = cbNeeded / sizeof(DWORD);
+    // Print the name and process identifier for each process.
     for ( i = 0; i < cProcesses; i++ )
     {
         if( aProcesses[i] != 0 )
         {
-            PROCESS p = GetProcessById((unsigned int)aProcesses[i] );
-            if ( callbackCondition != NULL )
-            {
-                if (callbackCondition(p, extraParam) == true) {
+            try {
+                PROCESS p = GetProcessById((unsigned int)aProcesses[i] );
+                if ( callbackCondition != NULL ) {
+                    if (callbackCondition(p, extraParam) == true) {
+                        processes.push_back(p);
+                    }
+                } else {
                     processes.push_back(p);
                 }
-            }  
-            else  
-            {
-                processes.push_back(p);
+            } catch (const FailedToGetProcessError& e) {
+//                qDebug() << e.what();
             }
         }
     }
-
+#else
+#endif
     return processes;
+}
+LIBOPEN_API std::vector<PROCESS> RunningProcessesWithCreateToolhelp32Snapshot( ProcessCondition callbackCondition, void* extraParam ) {
+    std::vector<PROCESS> processes;
+#ifdef _WIN32
+    HANDLE hProcessSnap;
+    HANDLE hProcess;
+    PROCESSENTRY32 pe32;
+
+    // Take a snapshot of all processes in the system.
+    hProcessSnap = CreateToolhelp32Snapshot( TH32CS_SNAPPROCESS, 0 );
+    if( hProcessSnap == INVALID_HANDLE_VALUE ) {
+        qDebug() << "[error] : CreateToolhelp32Snapshot returned INVALID_HANDLE_VALUE: " << GetErrorMessage(GetLastError()).c_str();
+        return processes;
+    }
+    // Set the size of the structure before using it.
+    pe32.dwSize = sizeof( PROCESSENTRY32 );
+    // Retrieve information about the first process,
+    // and exit if unsuccessful
+    if( !Process32First( hProcessSnap, &pe32 ) ) {
+        CloseHandle( hProcessSnap ); // clean the snapshot object
+        qDebug() << "[error] : Process32First Failed: " << GetErrorMessage(GetLastError()).c_str();
+        return processes;
+    }
+    // Now walk the snapshot of processes, and
+    // display information about each process in turn
+    do {
+        PROCESS p;
+        InitProcess(&p);
+        p.exeName = winrt::to_string(std::wstring(pe32.szExeFile));
+        // Retrieve the priority class.
+//        hProcess = OpenProcess( PROCESS_QUERY_INFORMATION|PROCESS_VM_READ, FALSE, pe32.th32ProcessID );
+        hProcess = OpenProcess( PROCESS_ALL_ACCESS, FALSE, pe32.th32ProcessID );
+        if( hProcess == NULL ) {
+//            qDebug() << "[error] : OpenProcess Failed: " << GetErrorMessage(GetLastError()).c_str();
+            continue;
+        }
+        p.Id = pe32.th32ProcessID;
+        p.exePath = p.exeName;
+//        qDebug() << "PROCESS ID : " << pe32.th32ProcessID;
+        if ( callbackCondition != NULL ) {
+            if (callbackCondition(p, extraParam) == true) {
+                processes.push_back(p);
+            }
+        } else {
+            processes.push_back(p);
+        }    } while( Process32Next( hProcessSnap, &pe32 ) );
+    CloseHandle( hProcessSnap );
+#else
+#endif
+    return processes;
+}
+
+LIBOPEN_API std::vector<PROCESS> RunningProcesses( ProcessCondition callbackCondition, void* extraParam ) 
+{
+    return RunningProcessesWithCreateToolhelp32Snapshot(callbackCondition, extraParam);
 }
 
 /**
